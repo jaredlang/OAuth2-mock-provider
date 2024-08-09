@@ -1,9 +1,9 @@
 from flask import Flask, request, jsonify, redirect
-from datetime import datetime, timedelta
+import jwt
+import time
 import uuid
 
 app = Flask(__name__)
-app.secret_key = 'supersecretkey'  # Replace this with a real secret key
 
 # In-memory data stores
 users = {
@@ -11,14 +11,18 @@ users = {
     "user2": {"password": "password2", "scope": "Mahattan"}
 }
 clients = {
-    "client_id_1": {"client_secret": "client_secret_1", "redirect_uri": "https://oauth2testapp.azurewebsites.net/callback"}
+    "client_id_1": {"client_secret": "client_secret_1", "redirect_uri": "http://localhost:5001/callback"}, 
+    "client_id_2": {"client_secret": "client_secret_2", "redirect_uri": "http://oauth2testapp.azurewebsites.net/callback"}
 }
 auth_codes = {}
 tokens = {}
 
+# jwt secret key
+JWT_SECRET_KEY = "jwt_secret_key"
+
 # Token expiration settings
-ACCESS_TOKEN_EXPIRATION = timedelta(minutes=5)      # 5 minutes
-REFRESH_TOKEN_EXPIRATION = timedelta(minutes=30)    # 30 minutes
+ACCESS_TOKEN_EXPIRATION = 60 * 5      # 5 minutes
+REFRESH_TOKEN_EXPIRATION = 60 * 30    # 30 minutes
 
 
 @app.route('/')
@@ -34,7 +38,7 @@ def generate_token():
 
 
 def is_token_expired(token_data):
-    return datetime.utcnow() > token_data['expires_at']
+    return time.time() > token_data['expires_at']
 
 
 @app.route('/authorize', methods=['GET', 'POST'])
@@ -75,8 +79,9 @@ def authorize():
 @app.route('/token', methods=['POST'])
 def token():
     client_id = request.form.get('client_id')
+    redirect_uri = request.form.get('redirect_uri')
     client_secret = request.form.get('client_secret')
-    code = request.form.get('code')
+    auth_code = request.form.get('auth_code')
     grant_type = request.form.get('grant_type')
     refresh_token = request.form.get('refresh_token')
 
@@ -84,78 +89,69 @@ def token():
     if client_id not in clients or clients[client_id]['client_secret'] != client_secret:
         return "Invalid client credentials", 401
 
-    if grant_type == 'authorization_code':
-        # Check authorization code
-        if code not in auth_codes or auth_codes[code]['client_id'] != client_id:
-            return "Invalid authorization code", 401
+    if grant_type == 'authorization_code':  
+        if client_id in clients and clients[client_id]['client_secret'] == client_secret:
+            if auth_code in auth_codes and auth_codes[auth_code]['redirect_uri'] == redirect_uri:
+                access_token = jwt.encode({
+                    'sub': auth_codes[auth_code]['username'],
+                    'client_id': client_id,
+                    'exp': time.time() + ACCESS_TOKEN_EXPIRATION
+                }, JWT_SECRET_KEY, algorithm='HS256')
 
-        # Generate access and refresh tokens
-        access_token = generate_token()
-        refresh_token = generate_token()
-        tokens[access_token] = {
-            'username': auth_codes[code]['username'],
-            'scope': users[auth_codes[code]['username']]['scope'],
-            'expires_at': datetime.utcnow() + ACCESS_TOKEN_EXPIRATION,
-            'refresh_token': refresh_token
-        }
-
-        # Return token response
-        return jsonify({
-            'access_token': access_token,
-            'token_type': 'Bearer',
-            'expires_in': ACCESS_TOKEN_EXPIRATION.total_seconds(),
-            'refresh_token': refresh_token,
-            'scope': tokens[access_token]['scope']
-        })
-
-    elif grant_type == 'refresh_token':
-        # Validate refresh token
-        for token_data in tokens.values():
-            if token_data['refresh_token'] == refresh_token:
-                if is_token_expired(token_data):
-                    return "Refresh token expired", 401
-
-                # Generate new access token
-                access_token = generate_token()
+                refresh_token = generate_token()  # Generate a refresh token
                 tokens[access_token] = {
-                    'username': token_data['username'],
-                    'scope': token_data['scope'],
-                    'expires_at': datetime.utcnow() + ACCESS_TOKEN_EXPIRATION,
+                    'client_id': client_id,
+                    'username': auth_codes[auth_code]['username'],
                     'refresh_token': refresh_token
                 }
 
-                # Return new access token
                 return jsonify({
                     'access_token': access_token,
-                    'token_type': 'Bearer',
-                    'expires_in': ACCESS_TOKEN_EXPIRATION.total_seconds(),
                     'refresh_token': refresh_token,
-                    'scope': tokens[access_token]['scope']
+                    'expires_in': ACCESS_TOKEN_EXPIRATION
                 })
+            
+            return "Invalid authorization code", 401
+        
+        return "Invalid client id or secret code", 401
 
+    elif grant_type == 'refresh_token':
+        refresh_token = request.form.get('refresh_token')
+
+        for token, data in tokens.items():
+            if data.get('refresh_token') == refresh_token and data['client_id'] == client_id:
+                access_token = jwt.encode({
+                    'sub': data['username'],
+                    'client_id': client_id,
+                    'exp': time.time() + ACCESS_TOKEN_EXPIRATION
+                }, JWT_SECRET_KEY, algorithm='HS256')
+
+                return jsonify({
+                    'access_token': access_token,
+                    'expires_in': 600
+                })
+            
         return "Invalid refresh token", 401
 
     return "Invalid grant type", 400
 
 
-@app.route('/userinfo', methods=['GET'])
-def userinfo():
-    auth_header = request.headers.get('Authorization')
-    if not auth_header:
-        return "Authorization header missing", 401
+@app.route('/introspect', methods=['POST'])
+def introspect():
+    token = request.form.get('token')
+    client_id = request.form.get('client_id')
+    client_secret = request.form.get('client_secret')
 
-    access_token = auth_header.split()[1]
-    if access_token not in tokens:
-        return "Invalid access token", 401
+    if client_id in clients and clients[client_id]['client_secret'] == client_secret:
+        try:
+            decoded = jwt.decode(token, JWT_SECRET_KEY, algorithms=["HS256"])
+            return jsonify({'active': True, 'username': decoded['sub'], 'client_id': decoded['client_id']})
+        except jwt.ExpiredSignatureError:
+            return jsonify({'active': False, 'error': 'Token expired'})
+        except jwt.InvalidTokenError:
+            return jsonify({'active': False, 'error': 'Invalid token'})
 
-    if is_token_expired(tokens[access_token]):
-        return "Access token expired", 401
-
-    user_data = tokens[access_token]
-    return jsonify({
-        'username': user_data['username'],
-        'scope': user_data['scope']
-    })
+    return jsonify({'active': False, 'error': 'Invalid client credentials'}), 400
 
 
 if __name__ == '__main__':
