@@ -11,7 +11,7 @@ users = {
     "user2": {"password": "password2", "scope": "Mahattan"}
 }
 clients = {
-    "client_id_1": {"client_secret": "client_secret_1", "redirect_uri": "http://localhost:5001/callback"}
+    "client_id_1": {"client_secret": "client_secret_1", "redirect_uri": "https://oauth2testapp.azurewebsites.net/callback"}
 }
 auth_codes = {}
 tokens = {}
@@ -19,6 +19,11 @@ tokens = {}
 # Token expiration settings
 ACCESS_TOKEN_EXPIRATION = timedelta(minutes=5)      # 5 minutes
 REFRESH_TOKEN_EXPIRATION = timedelta(minutes=30)    # 30 minutes
+
+
+@app.route('/')
+def home(): 
+    return "Home Page - OAuth2 Mock Provider", 200
 
 @app.route('/health')
 def health(): 
